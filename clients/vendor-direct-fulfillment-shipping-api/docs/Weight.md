@@ -1,0 +1,11 @@
+# Weight
+
+## Properties
+Name | Type | Description | Notes
+------------ | ------------- | ------------- | -------------
+**unit_of_measure** | **str** | The unit of measurement. | 
+**value** | [**Decimal**](Decimal.md) | The measurement value. | 
+
+[[Back to Model list]](../README.md#documentation-for-models) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to README]](../README.md)
+
+
