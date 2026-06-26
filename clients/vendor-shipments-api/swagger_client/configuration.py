@@ -55,6 +55,8 @@ class Configuration(object):
         self.username = ""
         # Password for HTTP basic authentication
         self.password = ""
+        # Access token for OAuth2 / LWA authentication
+        self.access_token = ""
 
         # Logging Settings
         self.logger = {}
