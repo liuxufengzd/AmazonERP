@@ -10,13 +10,13 @@ No display logic lives here; no API implementation logic lives here.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
-from core.config import MARKETPLACE_ID
+from core.config import MARKETPLACE_ID, SELLER_ID
 from modules.inventory.api.catalog import get_catalog_item
 from modules.inventory.api.fba import get_inventory_summaries
 from modules.inventory.api.fees import get_fees_estimate
-from modules.inventory.api.listing import get_listing_item
-from modules.inventory.api.restock import fetch_restock_report
+from modules.inventory.api.listing import get_active_skus_from_list, get_listing_item
 from modules.inventory.api.sales import (
     extract_daily_series,
     extract_sales_metrics,
@@ -28,57 +28,49 @@ from modules.inventory.replenishment import compute_replenishment
 logger = logging.getLogger(__name__)
 
 
-# ──────────────────────────────────────────────────────────────────────────
-# Internal helpers
-# ──────────────────────────────────────────────────────────────────────────
+def _summary_to_inventory_block(summary: dict[str, Any]) -> dict[str, Any]:
+    """Map a normalized FBA summary dict to the dashboard inventory section."""
+    return {
+        "total_quantity": summary.get("total_qty"),
+        "fulfillable_qty": summary.get("fulfillable_qty"),
+        "inbound_working_qty": summary.get("inbound_working_qty"),
+        "inbound_shipped_qty": summary.get("inbound_shipped_qty"),
+        "inbound_receiving_qty": summary.get("inbound_receiving_qty"),
+        "reserved_qty": summary.get("reserved_qty"),
+        "unfulfillable_qty": summary.get("unfulfillable_qty"),
+        "last_updated": str(summary.get("last_updated") or ""),
+    }
 
 
-def _inventory_section(sku: str) -> tuple[dict, str | None, str | None, str | None]:
-    """
-    Fetch FBA inventory for a SKU.
-    Returns (inventory_dict, asin, fnsku, condition).
-    """
+def _inventory_section(
+    sku: str,
+) -> tuple[dict[str, Any], str | None, str | None, str | None]:
+    """Fetch FBA inventory for a SKU."""
     summaries = get_inventory_summaries(seller_sku=sku)
     if not summaries:
         logger.info("No inventory record found for SKU %s", sku)
         return {}, None, None, None
 
-    s = summaries[0]
-    d = getattr(s, "inventory_details", None)
-
-    inventory = {
-        "total_quantity": getattr(s, "total_quantity", None),
-        "fulfillable_qty": getattr(d, "fulfillable_quantity", None) if d else None,
-        "inbound_working_qty": getattr(d, "inbound_working_quantity", None) if d else None,
-        "inbound_shipped_qty": getattr(d, "inbound_shipped_quantity", None) if d else None,
-        "inbound_receiving_qty": getattr(d, "inbound_receiving_quantity", None) if d else None,
-        "reserved_qty": getattr(d, "reserved_quantity", None) if d else None,
-        "unfulfillable_qty": getattr(d, "unfulfillable_quantity", None) if d else None,
-        "last_updated": str(getattr(s, "last_updated_time", "")),
-    }
+    summary = summaries[0]
     return (
-        inventory,
-        getattr(s, "asin", None),
-        getattr(s, "fn_sku", None),
-        getattr(s, "condition", None),
+        _summary_to_inventory_block(summary),
+        summary.get("asin"),
+        summary.get("fnsku"),
+        summary.get("condition"),
     )
 
 
 def _listing_section(seller_id: str, sku: str, fallback_asin: str | None) -> dict:
-    """
-    Fetch listing details and return a structured dict.
-    get_listing_item() now returns a raw dict (bypassing broken swagger deserializer).
-    """
+    """Fetch listing details and return a structured dict."""
     item: dict = get_listing_item(seller_id, sku)
 
     summaries_l: list = item.get("summaries") or []
-    offers_l:    list = item.get("offers")     or []
-    fa_l:        list = item.get("fulfillment_availability") or []
-    issues_l:    list = item.get("issues")     or []
+    offers_l: list = item.get("offers") or []
+    fa_l: list = item.get("fulfillment_availability") or []
+    issues_l: list = item.get("issues") or []
     first_s: dict = summaries_l[0] if summaries_l else {}
 
     def _parse_price(offer: dict) -> dict:
-        # Listings API v2021-08-01: offer["price"] = {"currencyCode": "...", "amount": "..."}
         p = offer.get("price") or {}
         raw_amount = p.get("amount")
         try:
@@ -123,48 +115,44 @@ def _listing_section(seller_id: str, sku: str, fallback_asin: str | None) -> dic
 
 
 def _catalog_section(asin: str) -> dict:
-    """
-    Fetch catalog/product details for an ASIN and return a structured dict.
-    get_catalog_item() now returns a raw dict (bypassing broken swagger deserializer).
-    """
+    """Fetch catalog/product details for an ASIN and return a structured dict."""
     cat: dict = get_catalog_item(asin)
 
-    # summaries is a list; pick the first entry
     summaries: list = cat.get("summaries") or []
     cs: dict = summaries[0] if summaries else {}
 
-    # Images: list of per-marketplace blocks, each with an "images" list
     main_image: str | None = None
-    for img_block in (cat.get("images") or []):
-        for img in (img_block.get("images") or []):
+    for img_block in cat.get("images") or []:
+        for img in img_block.get("images") or []:
             if img.get("variant") == "MAIN":
                 main_image = img.get("link")
                 break
         if main_image:
             break
 
-    # Identifiers: list of per-marketplace blocks, each with an "identifiers" list
     ext_ids: dict = {}
-    for id_block in (cat.get("identifiers") or []):
-        for id_obj in (id_block.get("identifiers") or []):
+    for id_block in cat.get("identifiers") or []:
+        for id_obj in id_block.get("identifiers") or []:
             ext_ids[id_obj.get("identifierType", "?")] = id_obj.get("identifier")
 
-    # Sales ranks: list of per-marketplace blocks
-    # Each block may have "classificationRanks" and/or "displayGroupRanks"
     sales_ranks: list[dict] = []
-    for rank_block in (cat.get("sales_ranks") or []):
-        for r in (rank_block.get("classificationRanks") or []):
-            sales_ranks.append({
-                "title": r.get("title"),
-                "rank": r.get("rank"),
-                "link": r.get("link"),
-            })
-        for r in (rank_block.get("displayGroupRanks") or []):
-            sales_ranks.append({
-                "title": r.get("title"),
-                "rank": r.get("rank"),
-                "link": r.get("link"),
-            })
+    for rank_block in cat.get("sales_ranks") or []:
+        for r in rank_block.get("classificationRanks") or []:
+            sales_ranks.append(
+                {
+                    "title": r.get("title"),
+                    "rank": r.get("rank"),
+                    "link": r.get("link"),
+                }
+            )
+        for r in rank_block.get("displayGroupRanks") or []:
+            sales_ranks.append(
+                {
+                    "title": r.get("title"),
+                    "rank": r.get("rank"),
+                    "link": r.get("link"),
+                }
+            )
 
     return {
         "asin": asin,
@@ -182,21 +170,18 @@ def _catalog_section(asin: str) -> dict:
 
 
 def _sales_section(sku: str, asin: str | None) -> dict:
-    """
-    Fetch aggregated (1/7/30/90-day) and 30-day daily sales metrics.
-    Falls back to ASIN-level data when SKU returns zero.
-    """
-    agg_1d  = extract_sales_metrics(get_sales_metrics(sku=sku, days=1,  asin=asin))
-    agg_7d  = extract_sales_metrics(get_sales_metrics(sku=sku, days=7,  asin=asin))
+    """Fetch aggregated (1/7/30/90-day) and 30-day daily sales metrics."""
+    agg_1d = extract_sales_metrics(get_sales_metrics(sku=sku, days=1, asin=asin))
+    agg_7d = extract_sales_metrics(get_sales_metrics(sku=sku, days=7, asin=asin))
     agg_30d = extract_sales_metrics(get_sales_metrics(sku=sku, days=30, asin=asin))
     agg_90d = extract_sales_metrics(get_sales_metrics(sku=sku, days=90, asin=asin))
 
-    daily_raw    = get_daily_sales(sku=sku, days=30, asin=asin)
+    daily_raw = get_daily_sales(sku=sku, days=30, asin=asin)
     daily_series = extract_daily_series(daily_raw)
 
     return {
-        "last_1_day":   agg_1d,
-        "last_7_days":  agg_7d,
+        "last_1_day": agg_1d,
+        "last_7_days": agg_7d,
         "last_30_days": agg_30d,
         "last_90_days": agg_90d,
         "daily_series": daily_series,
@@ -213,7 +198,7 @@ def _fees_section(asin: str, listing: dict) -> dict:
     if not price_offer:
         return {}
 
-    price    = price_offer["listing_price"]["amount"]
+    price = price_offer["listing_price"]["amount"]
     currency = price_offer["listing_price"].get("currency") or "JPY"
 
     try:
@@ -223,37 +208,9 @@ def _fees_section(asin: str, listing: dict) -> dict:
         return {}
 
 
-def _restock_report_section(sku: str) -> dict:
-    """Fetch and extract the restock report row for a specific SKU."""
-    rows = fetch_restock_report()
-    row = next(
-        (r for r in rows if r.get("sku") == sku or r.get("seller-sku") == sku),
-        None,
-    )
-    if not row:
-        return {"note": "SKU not found in restock report"}
-
-    return {
-        "days_of_supply": row.get("days-of-supply") or row.get("Days of Supply"),
-        "recommended_qty": row.get("recommended-replenishment-qty")
-            or row.get("Recommended Replenishment Qty"),
-        "reorder_date": row.get("reorder-date") or row.get("Reorder Date"),
-        "alert": row.get("alert") or row.get("Alert"),
-        "unit_sales_7d": row.get("unit-sales-7-day"),
-        "unit_sales_30d": row.get("unit-sales-30-day"),
-        "unit_sales_90d": row.get("unit-sales-90-day"),
-    }
-
-
-# ──────────────────────────────────────────────────────────────────────────
-# Public API
-# ──────────────────────────────────────────────────────────────────────────
-
-
 def fetch_sku_dashboard(
     seller_id: str,
     sku: str,
-    include_restock_report: bool = False,
 ) -> dict:
     """
     Collect and return all information for a single SKU.
@@ -268,16 +225,21 @@ def fetch_sku_dashboard(
     """
     result: dict = {"sku": sku, "marketplace_id": MARKETPLACE_ID}
 
-    # ── Step 1: FBA Inventory ──────────────────────────────────────────
     logger.info("[1/6] FBA Inventory for SKU: %s", sku)
     try:
         inventory, asin, fnsku, condition = _inventory_section(sku)
-        result.update({"asin": asin, "fnsku": fnsku, "condition": condition, "inventory": inventory})
+        result.update(
+            {
+                "asin": asin,
+                "fnsku": fnsku,
+                "condition": condition,
+                "inventory": inventory,
+            }
+        )
     except Exception:
         logger.exception("Inventory fetch failed for SKU %s", sku)
         result.update({"asin": None, "fnsku": None, "condition": None, "inventory": {}})
 
-    # ── Step 2: Listing Details ────────────────────────────────────────
     logger.info("[2/6] Listing details for SKU: %s", sku)
     try:
         result["listing"] = _listing_section(seller_id, sku, result.get("asin"))
@@ -289,7 +251,6 @@ def fetch_sku_dashboard(
 
     asin = result.get("asin")
 
-    # ── Step 3: Catalog Details ────────────────────────────────────────
     if asin:
         logger.info("[3/6] Catalog details for ASIN: %s", asin)
         try:
@@ -301,7 +262,6 @@ def fetch_sku_dashboard(
         logger.info("[3/6] Skipping catalog — ASIN not available")
         result["product"] = {}
 
-    # ── Step 4: Sales Metrics ──────────────────────────────────────────
     logger.info("[4/6] Sales metrics for SKU: %s", sku)
     try:
         result["sales"] = _sales_section(sku=sku, asin=asin)
@@ -309,7 +269,6 @@ def fetch_sku_dashboard(
         logger.exception("Sales fetch failed for SKU %s", sku)
         result["sales"] = {}
 
-    # ── Step 5: FBA Fees ───────────────────────────────────────────────
     if asin:
         logger.info("[5/6] FBA fees estimate for ASIN: %s", asin)
         try:
@@ -320,7 +279,6 @@ def fetch_sku_dashboard(
     else:
         result["fees"] = {}
 
-    # ── Step 6: Replenishment ──────────────────────────────────────────
     logger.info("[6/6] Computing replenishment for SKU: %s", sku)
     inv = result.get("inventory", {})
     fulfillable = inv.get("fulfillable_qty") or 0
@@ -340,44 +298,30 @@ def fetch_sku_dashboard(
         unit_count_90d=unit_90d,
     )
 
-    if include_restock_report:
-        logger.info("Fetching FBA Restock report (may take 1–5 min) …")
-        try:
-            result["replenishment_report"] = _restock_report_section(sku)
-        except Exception:
-            logger.exception("Restock report fetch failed for SKU %s", sku)
-            result["replenishment_report"] = {"error": "Restock report fetch failed"}
-    else:
-        result["replenishment_report"] = {
-            "note": "Pass ?restock=true to fetch the official Amazon restock report"
-        }
-
     return result
 
 
-def fetch_all_inventory_overview() -> list[dict]:
-    """
-    Fetch inventory summaries for all active FBA SKUs (no catalog/sales calls).
-    """
+def fetch_all_inventory_overview() -> list[dict[str, Any]]:
+    """Fetch inventory summaries for all active FBA SKUs (no catalog/sales calls)."""
     logger.info("Fetching full FBA inventory …")
     summaries = get_inventory_summaries()
 
-    rows = []
-    for s in summaries:
-        d = getattr(s, "inventory_details", None)
-        rows.append(
-            {
-                "sku": getattr(s, "seller_sku", None),
-                "asin": getattr(s, "asin", None),
-                "fnsku": getattr(s, "fn_sku", None),
-                "condition": getattr(s, "condition", None),
-                "total_qty": getattr(s, "total_quantity", None),
-                "fulfillable_qty": getattr(d, "fulfillable_quantity", None) if d else None,
-                "inbound_working_qty": getattr(d, "inbound_working_quantity", None) if d else None,
-                "inbound_shipped_qty": getattr(d, "inbound_shipped_quantity", None) if d else None,
-                "inbound_receiving_qty": getattr(d, "inbound_receiving_quantity", None) if d else None,
-                "reserved_qty": getattr(d, "reserved_quantity", None) if d else None,
-                "unfulfillable_qty": getattr(d, "unfulfillable_quantity", None) if d else None,
-            }
+    if not SELLER_ID:
+        logger.warning(
+            "SELLER_ID not set; returning all FBA SKUs without listing filter"
         )
-    return rows
+        return summaries
+
+    skus = [s["sku"] for s in summaries if s.get("sku")]
+    if not skus:
+        return summaries
+
+    logger.info("Filtering delisted SKUs (%d FBA records) …", len(skus))
+    active_skus = get_active_skus_from_list(SELLER_ID, skus)
+    filtered = [s for s in summaries if s.get("sku") in active_skus]
+    logger.info(
+        "Inventory overview: %d buyable SKUs (%d delisted/inactive removed)",
+        len(filtered),
+        len(summaries) - len(filtered),
+    )
+    return filtered

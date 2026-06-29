@@ -11,10 +11,12 @@ the next package is activated, so there is no cross-package import conflict.
 
 from __future__ import annotations
 
+import json
 import sys
+from typing import Any
 
-from core.config import CLIENT_BASE_PATH, REGION_HOST
 from core.auth import get_access_token
+from core.config import CLIENT_BASE_PATH, REGION_HOST
 
 
 def activate_package(package_name: str) -> None:
@@ -32,7 +34,7 @@ def activate_package(package_name: str) -> None:
     sys.path.insert(0, pkg_path)
 
 
-def make_api_client(package_name: str):
+def make_api_client(package_name: str) -> Any:
     """
     Return a configured swagger ``ApiClient`` for the given client package
     with a fresh LWA access token injected into the default headers.
@@ -48,3 +50,8 @@ def make_api_client(package_name: str):
     client = ApiClient(configuration=cfg)
     client.set_default_header("x-amz-access-token", get_access_token())
     return client
+
+
+def load_json_response(raw_response: Any) -> Any:
+    """Decode a swagger ``_preload_content=False`` HTTP response body as JSON."""
+    return json.loads(raw_response.data)

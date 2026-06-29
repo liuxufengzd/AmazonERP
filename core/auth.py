@@ -8,6 +8,7 @@ automatically when it falls within 60 seconds of expiry.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -34,28 +35,30 @@ class _TokenCache:
 
 
 _cache = _TokenCache()
+_lock = threading.Lock()
 
 
 def get_access_token() -> str:
     """Return a valid LWA access token, refreshing if near expiry."""
     now = time.time()
-    if _cache.is_valid(now):
+    with _lock:
+        if _cache.is_valid(now):
+            return _cache.access_token
+
+        logger.debug("Refreshing LWA access token")
+        resp = requests.post(
+            _LWA_TOKEN_URL,
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": REFRESH_TOKEN,
+                "client_id": CLIENT_ID,
+                "client_secret": CLIENT_SECRET,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+
+        _cache.access_token = payload["access_token"]
+        _cache.expires_at = now + payload.get("expires_in", 3600)
         return _cache.access_token
-
-    logger.debug("Refreshing LWA access token")
-    resp = requests.post(
-        _LWA_TOKEN_URL,
-        data={
-            "grant_type": "refresh_token",
-            "refresh_token": REFRESH_TOKEN,
-            "client_id": CLIENT_ID,
-            "client_secret": CLIENT_SECRET,
-        },
-        timeout=15,
-    )
-    resp.raise_for_status()
-    payload = resp.json()
-
-    _cache.access_token = payload["access_token"]
-    _cache.expires_at = now + payload.get("expires_in", 3600)
-    return _cache.access_token

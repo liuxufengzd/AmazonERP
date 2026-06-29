@@ -40,7 +40,6 @@ Interactive API docs: [http://localhost:8000/api/docs](http://localhost:8000/api
 |--------|------|-------------|
 | `GET` | `/api/inventory/` | All active FBA SKUs (fast, no catalog/sales calls) |
 | `GET` | `/api/inventory/{sku}` | Full dashboard — inventory, listing, product, sales, fees, replenishment |
-| `GET` | `/api/inventory/{sku}?restock=true` | Same, plus official FBA Restock Report (adds 1–5 min) |
 
 ## Project Structure
 
@@ -59,7 +58,7 @@ modules/inventory/
     catalog.py                  # Catalog Items API
     listing.py                  # Listings Items API
     sales.py                    # Sales API
-    restock.py                  # FBA Restock Report
+    fees.py                     # Product Fees API
 clients/                        # auto-generated swagger clients (SP-API)
 static/                         # frontend (served at /)
 ```

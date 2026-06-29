@@ -22,49 +22,26 @@ JSON field reference (from OrderMetricsInterval.attribute_map):
 from __future__ import annotations
 
 import datetime
-import json
 import logging
-import time
 
-from core.api_loader import make_api_client
+from core.api_loader import load_json_response, make_api_client
 from core.config import (
     MARKETPLACE_ID,
-    SALES_API_MAX_RETRIES,
-    SALES_API_MIN_INTERVAL,
-    TARGET_COUNTRY,
+    SALES_TIMEZONE,
 )
-from core.rate_limit import RateLimiter
 
 logger = logging.getLogger(__name__)
-
-_SALES_LIMITER = RateLimiter(SALES_API_MIN_INTERVAL)
-
-_TZ_MAP: dict[str, str] = {
-    "JP": "Asia/Tokyo",
-    "US": "US/Eastern",
-    "AU": "Australia/Sydney",
-    "SG": "Asia/Singapore",
-    "DE": "Europe/Berlin",
-    "UK": "Europe/London",
-}
-_GRANULARITY_TZ = _TZ_MAP.get(TARGET_COUNTRY, "UTC")
 
 
 def _make_interval(days: int) -> str:
     """Return ISO-8601 interval string for the past ``days`` days in UTC."""
-    end   = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    end = datetime.datetime.now(datetime.timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
     start = end - datetime.timedelta(days=days)
     return (
-        f"{start.strftime('%Y-%m-%dT%H:%M:%SZ')}"
-        f"--{end.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+        f"{start.strftime('%Y-%m-%dT%H:%M:%SZ')}--{end.strftime('%Y-%m-%dT%H:%M:%SZ')}"
     )
-
-
-def _is_rate_limit_error(exc: Exception) -> bool:
-    status = getattr(exc, "status", None)
-    body = getattr(exc, "body", b"") or b""
-    body_str = body.decode("utf-8", errors="replace").lower() if isinstance(body, bytes) else str(body).lower()
-    return status == 429 or "quota" in body_str or "throttl" in body_str or "rate" in body_str
 
 
 def _call_raw(
@@ -89,42 +66,23 @@ def _call_raw(
 
     logger.debug(
         "Sales API: granularity=%s interval=%s sku=%s asin=%s",
-        granularity, interval, sku, asin,
+        granularity,
+        interval,
+        sku,
+        asin,
     )
 
-    last_exc: Exception | None = None
-    for attempt in range(SALES_API_MAX_RETRIES):
-        _SALES_LIMITER.wait()
-        try:
-            raw = api.get_order_metrics(
-                marketplace_ids=[MARKETPLACE_ID],
-                interval=interval,
-                granularity=granularity,
-                granularity_time_zone=_GRANULARITY_TZ,
-                buyer_type="B2C",
-                _preload_content=False,
-                **kwargs,
-            )
-            data: dict = json.loads(raw.data)
-            return data.get("payload") or []
-        except Exception as exc:
-            from swagger_client.rest import ApiException  # type: ignore
-
-            if isinstance(exc, ApiException) and _is_rate_limit_error(exc):
-                last_exc = exc
-                if attempt < SALES_API_MAX_RETRIES - 1:
-                    delay = min(60.0, 3.0 * (2 ** attempt))
-                    logger.warning(
-                        "Sales API rate limited for sku=%s asin=%s; retry in %.1fs (%d/%d)",
-                        sku, asin, delay, attempt + 1, SALES_API_MAX_RETRIES,
-                    )
-                    time.sleep(delay)
-                    continue
-            raise
-
-    if last_exc:
-        raise last_exc
-    return []
+    raw = api.get_order_metrics(
+        marketplace_ids=[MARKETPLACE_ID],
+        interval=interval,
+        granularity=granularity,
+        granularity_time_zone=SALES_TIMEZONE,
+        buyer_type="B2C",
+        _preload_content=False,
+        **kwargs,
+    )
+    data: dict = load_json_response(raw)
+    return data.get("payload") or []
 
 
 def _total_units(rows: list[dict]) -> int:
@@ -143,7 +101,9 @@ def get_sales_metrics(sku: str, days: int = 30, asin: str | None = None) -> list
     if asin and _total_units(rows) == 0:
         asin_rows = _call_raw("Total", interval, asin=asin)
         if _total_units(asin_rows) > 0:
-            logger.debug("SKU %s has 0 units; using ASIN %s data (%d days)", sku, asin, days)
+            logger.debug(
+                "SKU %s has 0 units; using ASIN %s data (%d days)", sku, asin, days
+            )
             return asin_rows
     return rows
 
@@ -172,15 +132,20 @@ def extract_sales_metrics(rows: list[dict]) -> dict:
     ``revenue_amount``, ``revenue_currency``.
     """
     if not rows:
-        return {"unit_count": 0, "order_count": 0, "revenue_amount": None, "revenue_currency": None}
+        return {
+            "unit_count": 0,
+            "order_count": 0,
+            "revenue_amount": None,
+            "revenue_currency": None,
+        }
 
-    total_units  = 0
+    total_units = 0
     total_orders = 0
-    total_rev    = 0.0
+    total_rev = 0.0
     currency: str | None = None
 
     for r in rows:
-        total_units  += int(r.get("unitCount")  or 0)
+        total_units += int(r.get("unitCount") or 0)
         total_orders += int(r.get("orderCount") or 0)
         ts = r.get("totalSales") or {}
         raw_amt = ts.get("amount")
@@ -193,9 +158,9 @@ def extract_sales_metrics(rows: list[dict]) -> dict:
                 currency = ts.get("currencyCode")
 
     return {
-        "unit_count":      total_units,
-        "order_count":     total_orders,
-        "revenue_amount":  round(total_rev, 2) if total_rev else None,
+        "unit_count": total_units,
+        "order_count": total_orders,
+        "revenue_amount": round(total_rev, 2) if total_rev else None,
         "revenue_currency": currency,
     }
 
@@ -217,11 +182,13 @@ def extract_daily_series(daily_rows: list[dict]) -> list[dict]:
             rev = float(raw_amt) if raw_amt is not None else 0.0
         except (TypeError, ValueError):
             rev = 0.0
-        series.append({
-            "date":    date_part,
-            "units":   int(r.get("unitCount")  or 0),
-            "revenue": rev,
-            "orders":  int(r.get("orderCount") or 0),
-        })
+        series.append(
+            {
+                "date": date_part,
+                "units": int(r.get("unitCount") or 0),
+                "revenue": rev,
+                "orders": int(r.get("orderCount") or 0),
+            }
+        )
     series.sort(key=lambda x: x["date"])
     return series

@@ -50,8 +50,8 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
 @app.get("/", include_in_schema=False)
-async def root() -> FileResponse:
-    return FileResponse(str(STATIC_DIR / "index.html"))
+def root() -> FileResponse:
+    return FileResponse(STATIC_DIR / "index.html")
 
 
 if __name__ == "__main__":

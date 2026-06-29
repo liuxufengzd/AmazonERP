@@ -61,17 +61,56 @@ MARKETPLACE_IDS: dict[str, dict[str, str]] = {
     },
 }
 
-MARKETPLACE_ID: str = MARKETPLACE_IDS[REGION][TARGET_COUNTRY]
-REGION_HOST: str = _REGION_HOST[REGION]
+# Per-country locale and timezone used by Catalog and Sales API calls.
+MARKETPLACE_LOCALE: dict[str, str] = {
+    "JP": "ja_JP",
+    "US": "en_US",
+    "AU": "en_AU",
+    "SG": "en_SG",
+    "DE": "de_DE",
+    "UK": "en_GB",
+}
+
+MARKETPLACE_TIMEZONE: dict[str, str] = {
+    "JP": "Asia/Tokyo",
+    "US": "US/Eastern",
+    "AU": "Australia/Sydney",
+    "SG": "Asia/Singapore",
+    "DE": "Europe/Berlin",
+    "UK": "Europe/London",
+}
+
+
+def _resolve_region_host(region: str) -> str:
+    host = _REGION_HOST.get(region)
+    if host is None:
+        valid = ", ".join(sorted(_REGION_HOST))
+        raise ValueError(f"Invalid REGION={region!r}. Expected one of: {valid}")
+    return host
+
+
+def _resolve_marketplace_id(region: str, country: str) -> str:
+    by_country = MARKETPLACE_IDS.get(region)
+    if by_country is None:
+        valid = ", ".join(sorted(MARKETPLACE_IDS))
+        raise ValueError(f"Invalid REGION={region!r}. Expected one of: {valid}")
+    marketplace_id = by_country.get(country)
+    if marketplace_id is None:
+        valid = ", ".join(sorted(by_country))
+        raise ValueError(
+            f"Invalid TARGET_COUNTRY={country!r} for REGION={region!r}. "
+            f"Expected one of: {valid}"
+        )
+    return marketplace_id
+
+
+MARKETPLACE_ID: str = _resolve_marketplace_id(REGION, TARGET_COUNTRY)
+REGION_HOST: str = _resolve_region_host(REGION)
+CATALOG_LOCALE: str = MARKETPLACE_LOCALE.get(TARGET_COUNTRY, "en_US")
+SALES_TIMEZONE: str = MARKETPLACE_TIMEZONE.get(TARGET_COUNTRY, "UTC")
 
 # ──────────────────────────────────────────────────────────────────────────
 # Business logic defaults
 # ──────────────────────────────────────────────────────────────────────────
 
 RESTOCK_TARGET_DAYS: int = 60
-
-# Sales API (rate limit: 0.5 req/s — see sales-api docs)
-# ──────────────────────────────────────────────────────────────────────────
-
-SALES_API_MIN_INTERVAL: float = float(os.getenv("SALES_API_MIN_INTERVAL", "2.1"))
-SALES_API_MAX_RETRIES: int = int(os.getenv("SALES_API_MAX_RETRIES", "6"))
